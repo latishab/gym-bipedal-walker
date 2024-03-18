@@ -10,12 +10,16 @@ class Actor(nn.Module):
         super(Actor, self).__init__()
         self.fc1 = nn.Linear(input_dim, 64)
         self.fc2 = nn.Linear(64, 32)
-        self.fc3 = nn.Linear(32, action_dim)
+        self.mean = nn.Linear(32, action_dim)
+        self.log_std = nn.Linear(32, action_dim)
     
     def forward(self, x):
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
-        return torch.tanh(self.fc3(x))  # Assuming continuous action space
+        mean = torch.tanh(self.mean(x))  # Assuming continuous action space
+        log_std = self.log_std(x)  # Log standard deviation
+        log_std = torch.clamp(log_std, min=-20, max=2)  # Clamp for numerical stability
+        return mean, log_std
 
 class Critic(nn.Module):
     def __init__(self, input_dim):
@@ -93,19 +97,29 @@ def ppo_update(actor, critic, actor_optimizer, critic_optimizer, states, actions
             critic_loss.backward()
             critic_optimizer.step()
 
-
-# Helper functions
+# Helper function
 def sample_action(state, actor):
-    print("State before conversion:", state)  # Debugging line
     state = torch.FloatTensor(state).unsqueeze(0)
-    action = actor(state).detach().numpy()[0]  # Getting the action from the actor network
-    return action
+    with torch.no_grad():
+        mean, log_std = actor(state)
+        std = log_std.exp()
+        normal_dist = torch.distributions.Normal(mean, std)
+        action = normal_dist.sample() # Using Normal over Categorical because we are in continuous space
+        log_prob = normal_dist.log_prob(action).sum(axis=-1, keepdim=True)  # Sum across action dimensions
+
+    # Squeeze the unnecessary dimensions and convert to numpy array
+    action = action.squeeze().numpy()  # This should adjust the shape correctly
+    log_prob = log_prob.squeeze().numpy()  # Adjust if needed, depending on how you use log_prob
+    return action, log_prob
 
 # Convert list of tensors to a tensor
 def to_tensor(lst):
     return torch.tensor(lst, dtype=torch.float)
 
 def main():
+    # Initialize ppo_epochs, mini_batch_size, and num_episodes
+    ppo_epochs = 4  # Number of times to iterate over the whole dataset for updating the policy
+    mini_batch_size = 64  # Number of samples to use for each mini-batch update
     num_episodes = 10
 
     # Initialize the BipedalWalker-v3 environment
@@ -113,36 +127,43 @@ def main():
     num_inputs  = env.observation_space.shape[0]
     num_outputs = env.action_space.shape[0]
 
+    # Actor and Critic
     actor = Actor(num_inputs, num_outputs)
     critic = Critic(num_inputs)
-
     actor_optimizer = optim.Adam(actor.parameters(), lr=3e-4)
     critic_optimizer = optim.Adam(critic.parameters(), lr=3e-4)
 
     for episode in range(num_episodes):
-        ppo_epochs = 4  # Number of times to iterate over the whole dataset for updating the policy
-        mini_batch_size = 64  # Number of samples to use for each mini-batch update
-
         # Initial reset returns a tuple (state, {})
         state, _ = env.reset() # Unpack the tuple here to get just the state
+        state = torch.FloatTensor(state).unsqueeze(0)  # Convert numpy array to PyTorch tensor
         total_reward = 0
         done = False
 
-        states, actions, rewards, next_states, dones = [], [], [], [], []
+        # Initialize lists for states, actions, rewards, next_states, dones, and log_probs [Data Collection]
+        states, actions, rewards, next_states, dones, log_probs = [], [], [], [], [], []
 
         while not done:
             print("Current state:", state)  # Debugging line
-            action = sample_action(state, actor)
+            action, log_prob = sample_action(state, actor)
+            # Validation check - adjust or remove after confirming it works as expected
+            assert action.shape == (4,), f"Expected action shape (4,), got {action.shape}"
             next_state, reward, done, truncated, _ = env.step(action)
             
+            # Store data as tensors [Data Collection]
             states.append(state)
-            actions.append(action)
+            actions.append(torch.FloatTensor(action))
             rewards.append(reward)
-            next_states.append(next_state)
-            dones.append(done)
+            next_states.append(torch.FloatTensor(next_state).unsqueeze(0))
+            dones.append(float(done)) # Indicating whether each episode has ended
+            log_probs.append(log_prob)  # Storing logarithm probabilities for each action
 
-            state = next_state
+            state = torch.FloatTensor(next_state).unsqueeze(0)  # Prepare for the next iteration
             total_reward += reward
+
+        # Convert rewards and dones to tensors
+        rewards = torch.tensor(rewards, dtype=torch.float32)
+        dones = torch.tensor(dones, dtype=torch.float32)
 
         ppo_update(actor, critic, actor_optimizer, critic_optimizer, 
                    states, actions, rewards, next_states, dones, ppo_epochs, mini_batch_size)
