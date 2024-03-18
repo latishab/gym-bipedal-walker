@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
+import matplotlib.pyplot as plt
 import numpy as np
 import gym
 
@@ -34,68 +35,116 @@ class Critic(nn.Module):
         return self.fc3(x)
 
 def compute_gae(next_value, rewards, masks, values, gamma=0.99, tau=0.95):
-    values = values + [next_value]
+    if next_value.dim() == 0:
+        next_value = next_value.unsqueeze(0)  # Make it [1] if it's a scalar.
+    else:
+        next_value = next_value.squeeze()  # Make sure it's not more than 1D.
+
+    values = torch.cat([values, next_value], dim=0)  # Concatenate along the correct dimension.
+
     gae = 0
     returns = []
     for step in reversed(range(len(rewards))):
         delta = rewards[step] + gamma * values[step + 1] * masks[step] - values[step]
         gae = delta + gamma * tau * masks[step] * gae
         returns.insert(0, gae + values[step])
-    return returns
 
-def ppo_iter(mini_batch_size, states, actions, log_probs, returns, advantage):
+    # Make sure to return exactly two items: the GAE and the returns. Make sure it is in tensor
+    returns = torch.tensor(returns, dtype=torch.float32)
+    gae = torch.tensor(gae, dtype=torch.float32)
+    return gae, returns
+
+def safe_normalize(tensor):
+    if tensor.nelement() == 0:  # Check if the tensor is empty
+        print("Warning: Attempted to normalize an empty tensor. Returning original tensor.")
+        return tensor
+    mean = tensor.mean()
+    std = tensor.std()
+    if std.item() > 1e-10:  # Ensure std is not zero to avoid division by zero
+        normalized_tensor = (tensor - mean) / (std + 1e-10)
+        return normalized_tensor
+    print("Warning: Standard deviation too close to zero for normalization. Returning original tensor.")
+    return tensor
+
+def ppo_iter(mini_batch_size, states, actions, log_probs, returns, advantages):
     batch_size = states.size(0)
-    for _ in range(batch_size // mini_batch_size):
-        rand_ids = np.random.randint(0, batch_size, mini_batch_size)
-        yield states[rand_ids, :], actions[rand_ids, :], log_probs[rand_ids, :], returns[rand_ids, :], advantage[rand_ids, :]
+    for i in range(0, batch_size, mini_batch_size):
+        start, end = i, min(i + mini_batch_size, batch_size)
+        if advantages.nelement() == 0:
+            print("Warning: Advantages tensor is empty. Skipping mini-batch.")
+            continue
+        yield states[start:end], actions[start:end], log_probs[start:end], returns[start:end], advantages[start:end]
 
-def ppo_update(actor, critic, actor_optimizer, critic_optimizer, states, actions, rewards, next_states, dones, ppo_epochs, mini_batch_size, clip_param=0.2, gamma=0.99, tau=0.95):
-    states = torch.stack(states)
-    next_states = torch.stack(next_states)
-    actions = torch.stack(actions)
+def ppo_update(actor, critic, actor_optimizer, critic_optimizer, states, actions, rewards, next_states, dones, log_probs, ppo_epochs, mini_batch_size, clip_param=0.2, gamma=0.99, tau=0.95):
+
+    # Ensure all inputs are tensors with the correct dimensions
+    states = torch.stack(states).float().squeeze() if isinstance(states, list) else states.float().squeeze()
+    next_states = torch.stack(next_states) if isinstance(next_states, list) else next_states.float().squeeze()
+    actions = torch.stack(actions).float().squeeze() if isinstance(actions, list) else actions.float().squeeze()
+    log_probs = torch.stack(log_probs).float().squeeze() if isinstance(log_probs, list) else log_probs.float().squeeze()
     rewards = torch.tensor(rewards, dtype=torch.float32)
     dones = torch.tensor(dones, dtype=torch.float32)
-    log_probs = torch.stack(log_probs)  # Assume log_probs are collected during data gathering
 
     # Calculate value estimates for states and next_states
-    values = critic(states).detach().squeeze()
-    next_values = critic(next_states).detach().squeeze()
+    values = critic(states).squeeze()
+    next_values = critic(next_states).squeeze()
 
     # Calculate GAE and returns
     advantages, returns = compute_gae(next_values, rewards, 1 - dones, values, gamma, tau)
-    
-    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-10)  # Normalize advantages
+
+    if advantages.dim() == 0:
+    # It's a scalar, so add a dimension to make it a 1D tensor with a single element
+        print("Advantages dimension is 0, so unsqueeze now")
+        advantages = advantages.unsqueeze(0)
+        advantages = safe_normalize(advantages)
+
+    print(f"Advantages shape after compute_gae: {advantages.shape}")
+    print(f"Returns shape after compute_gae: {returns.shape}")
     
     for _ in range(ppo_epochs):
-        # Assuming ppo_iter yields mini-batches
-        for state, action, old_log_prob, return_, adv in ppo_iter(mini_batch_size, states, actions, log_probs, returns, advantages):
-            # Get current policies' log probabilities and value estimates for the given states
-            dist = actor(state)
-            value = critic(state).squeeze()
-            
-            # Assume dist outputs have method .log_prob() and .entropy()
-            new_log_prob = dist.log_prob(action)
-            entropy = dist.entropy().mean()
-            
-            # Calculating the ratio (pi_theta / pi_theta_old)
-            ratios = torch.exp(new_log_prob - old_log_prob)
-            
-            # Calculating Surrogate Loss
-            surr1 = ratios * adv
-            surr2 = torch.clamp(ratios, 1.0 - clip_param, 1.0 + clip_param) * adv
-            actor_loss = - torch.min(surr1, surr2).mean() - 0.01 * entropy  # Including entropy to encourage exploration
-            
-            # Finalizing critic loss
-            critic_loss = F.mse_loss(return_, value)
-            
-            # Perform gradient update
-            actor_optimizer.zero_grad()
-            actor_loss.backward()
-            actor_optimizer.step()
-            
-            critic_optimizer.zero_grad()
-            critic_loss.backward()
-            critic_optimizer.step()
+        actor_optimizer.zero_grad()
+        critic_optimizer.zero_grad()  # Zero gradients for both optimizers
+        for idx in range(0, len(states), mini_batch_size):
+            minibatch_indices = slice(idx, idx + mini_batch_size)
+            minibatch_states = states[minibatch_indices]
+            minibatch_actions = actions[minibatch_indices]
+            minibatch_old_log_probs = log_probs[minibatch_indices]
+            minibatch_rewards = rewards[minibatch_indices]
+            minibatch_dones = dones[minibatch_indices]
+            minibatch_next_states = next_states[minibatch_indices]
+
+            # Recompute values for the current mini-batch
+            minibatch_values = critic(minibatch_states).squeeze()
+            minibatch_next_values = critic(minibatch_next_states).squeeze()
+
+            # Recompute GAE and returns for the mini-batch
+            minibatch_advantages, minibatch_returns = compute_gae(minibatch_next_values, minibatch_rewards, 1 - minibatch_dones, minibatch_values, gamma, tau)
+            if minibatch_advantages.dim() == 0:
+                minibatch_advantages = minibatch_advantages.unsqueeze(0)  # Ensure correct dimensionality
+
+            # Compute new log probabilities, entropy, and ratio
+            mean, log_std = actor(minibatch_states)
+            dist = torch.distributions.Normal(mean, log_std.exp())
+            minibatch_new_log_probs = dist.log_prob(minibatch_actions).sum(-1)
+            ratio = torch.exp(minibatch_new_log_probs - minibatch_old_log_probs)
+
+            # Compute surrogate loss
+            surr1 = ratio * minibatch_advantages
+            surr2 = torch.clamp(ratio, 1.0 - clip_param, 1.0 + clip_param) * minibatch_advantages
+            actor_loss = -torch.min(surr1, surr2).mean()
+
+            # Compute critic loss. Inputs needs to be a tensor instead a list
+            critic_loss = F.mse_loss(minibatch_returns, minibatch_values)
+
+            # Combine losses for backpropagation
+            total_loss = actor_loss + 0.5 * critic_loss - 0.01 * dist.entropy().mean()
+            total_loss.backward()
+        
+        # Step optimizers after accumulating gradients
+        actor_optimizer.step()
+        critic_optimizer.step()
+
+    print("Update complete.")
 
 # Helper function
 def sample_action(state, actor):
@@ -107,9 +156,8 @@ def sample_action(state, actor):
         action = normal_dist.sample() # Using Normal over Categorical because we are in continuous space
         log_prob = normal_dist.log_prob(action).sum(axis=-1, keepdim=True)  # Sum across action dimensions
 
-    # Squeeze the unnecessary dimensions and convert to numpy array
-    action = action.squeeze().numpy()  # This should adjust the shape correctly
-    log_prob = log_prob.squeeze().numpy()  # Adjust if needed, depending on how you use log_prob
+    # Keep action and log_prob as tensors for now
+    action = action.squeeze() # Squeeze unnecessary dimensions
     return action, log_prob
 
 # Convert list of tensors to a tensor
@@ -141,18 +189,19 @@ def main():
         done = False
 
         # Initialize lists for states, actions, rewards, next_states, dones, and log_probs [Data Collection]
+        episode_rewards = []
         states, actions, rewards, next_states, dones, log_probs = [], [], [], [], [], []
 
         while not done:
-            print("Current state:", state)  # Debugging line
             action, log_prob = sample_action(state, actor)
+            action = action.squeeze().detach().cpu().numpy()
             # Validation check - adjust or remove after confirming it works as expected
             assert action.shape == (4,), f"Expected action shape (4,), got {action.shape}"
             next_state, reward, done, truncated, _ = env.step(action)
             
             # Store data as tensors [Data Collection]
             states.append(state)
-            actions.append(torch.FloatTensor(action))
+            actions.append(torch.FloatTensor(action).unsqueeze(0))
             rewards.append(reward)
             next_states.append(torch.FloatTensor(next_state).unsqueeze(0))
             dones.append(float(done)) # Indicating whether each episode has ended
@@ -161,14 +210,24 @@ def main():
             state = torch.FloatTensor(next_state).unsqueeze(0)  # Prepare for the next iteration
             total_reward += reward
 
-        # Convert rewards and dones to tensors
-        rewards = torch.tensor(rewards, dtype=torch.float32)
-        dones = torch.tensor(dones, dtype=torch.float32)
+        # Convert lists to tensors
+        rewards = torch.tensor(rewards).clone().detach().float()
+        dones = torch.tensor(dones).clone().detach().float()
+        log_probs = torch.stack(log_probs) 
 
         ppo_update(actor, critic, actor_optimizer, critic_optimizer, 
-                   states, actions, rewards, next_states, dones, ppo_epochs, mini_batch_size)
+                   states, actions, rewards, next_states, dones, log_probs, ppo_epochs, mini_batch_size)
         print(f"Episode: {episode+1}, Total Reward: {total_reward}")
+        episode_rewards.append(total_reward) # Append total_reward to the list for the current episode
+    
+    # After all episodes, plot the rewards
+    plt.plot(episode_rewards)
+    plt.title("Episode Rewards Over Time")
+    plt.xlabel("Episode")
+    plt.ylabel("Total Reward")
+    plt.savefig('rewards_plot.png')
+
+    env.close() # Close the environment
 
 if __name__ == "__main__":
     main()
-    env.close() # Close the environment
