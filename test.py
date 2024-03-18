@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
+import copy
 import matplotlib.pyplot as plt
 import numpy as np
 import gym
@@ -34,37 +35,37 @@ class Critic(nn.Module):
         x = F.relu(self.fc2(x))
         return self.fc3(x)
 
-def compute_gae(next_value, rewards, masks, values, gamma=0.99, tau=0.95):
-    if next_value.dim() == 0:
-        next_value = next_value.unsqueeze(0)  # Make it [1] if it's a scalar.
-    else:
-        next_value = next_value.squeeze()  # Make sure it's not more than 1D.
+def compute_gae(next_value, rewards, masks, values, gamma=0.99, tau=0.95, normalize=True):
+    # Convert PyTorch tensors to NumPy arrays for easier manipulation
+    next_value_np = next_value.detach().cpu().numpy()
+    rewards_np = rewards.detach().cpu().numpy()
+    masks_np = masks.detach().cpu().numpy()
+    values_np = values.detach().cpu().numpy()
 
-    values = torch.cat([values, next_value], dim=0)  # Concatenate along the correct dimension.
+    deltas = [r + gamma * (1 - d) * nv - v for r, d, nv, v in zip(rewards_np, masks_np, next_value_np, values_np)]
+    deltas = np.array(deltas)  # Convert list to NumPy array
 
-    gae = 0
-    returns = []
-    for step in reversed(range(len(rewards))):
-        delta = rewards[step] + gamma * values[step + 1] * masks[step] - values[step]
-        gae = delta + gamma * tau * masks[step] * gae
-        returns.insert(0, gae + values[step])
+    # Initialize GAEs as a copy of deltas and perform the backward iteration
+    gaes = copy.deepcopy(deltas)
+    for t in reversed(range(len(deltas) - 1)):
+        gaes[t] = gaes[t] + (1 - masks_np[t]) * gamma * tau * gaes[t + 1]
 
-    # Make sure to return exactly two items: the GAE and the returns. Make sure it is in tensor
-    returns = torch.tensor(returns, dtype=torch.float32)
-    gae = torch.tensor(gae, dtype=torch.float32)
-    return gae, returns
+    # Compute the targets for value updates
+    targets = gaes + values_np
 
-def safe_normalize(tensor):
-    if tensor.nelement() == 0:  # Check if the tensor is empty
-        print("Warning: Attempted to normalize an empty tensor. Returning original tensor.")
-        return tensor
-    mean = tensor.mean()
-    std = tensor.std()
-    if std.item() > 1e-10:  # Ensure std is not zero to avoid division by zero
-        normalized_tensor = (tensor - mean) / (std + 1e-10)
-        return normalized_tensor
-    print("Warning: Standard deviation too close to zero for normalization. Returning original tensor.")
-    return tensor
+    # Normalize GAEs if required
+    if normalize:
+        gaes = (gaes - gaes.mean()) / (gaes.std() + 1e-8)
+
+    # Convert back to PyTorch tensors before returning
+    gaes_torch = torch.tensor(gaes, dtype=torch.float32)
+    targets_torch = torch.tensor(targets, dtype=torch.float32)
+
+    # Ensure the tensors are in the correct shape
+    gaes_torch = gaes_torch.view(-1, 1)
+    targets_torch = targets_torch.view(-1, 1)
+
+    return gaes_torch, targets_torch
 
 def ppo_iter(mini_batch_size, states, actions, log_probs, returns, advantages):
     batch_size = states.size(0)
@@ -91,12 +92,6 @@ def ppo_update(actor, critic, actor_optimizer, critic_optimizer, states, actions
 
     # Calculate GAE and returns
     advantages, returns = compute_gae(next_values, rewards, 1 - dones, values, gamma, tau)
-
-    if advantages.dim() == 0:
-    # It's a scalar, so add a dimension to make it a 1D tensor with a single element
-        print("Advantages dimension is 0, so unsqueeze now")
-        advantages = advantages.unsqueeze(0)
-        advantages = safe_normalize(advantages)
 
     print(f"Advantages shape after compute_gae: {advantages.shape}")
     print(f"Returns shape after compute_gae: {returns.shape}")
