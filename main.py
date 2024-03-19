@@ -1,5 +1,8 @@
 from ppo import PPO
 import gym
+from gym.wrappers import Monitor
+
+import os
 import torch
 
 def train(timesteps):
@@ -9,7 +12,11 @@ def train(timesteps):
     model.save_model()
 
 def test():
+    video_folder = 'videos'
+    os.makedirs(video_folder, exist_ok=True)
+    
     env = gym.make('BipedalWalker-v3', render_mode="human")
+    env = Monitor(env, video_folder, video_callable=lambda episode_id: True, force=True)
     model = PPO(env)
     model.load_model()
 
@@ -31,8 +38,8 @@ def test():
 
 if __name__ == '__main__':
     # Train the model
-    timesteps=100000
-    train(timesteps)
+    # timesteps=1000000
+    # train(timesteps)
 
-    # # Test the model
-    # test()
+    # Test the model
+    test()

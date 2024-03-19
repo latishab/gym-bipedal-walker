@@ -5,7 +5,11 @@ import torch
 import torch.nn as nn
 from torch.optim import Adam
 from torch.distributions import MultivariateNormal
+
+# import local functions
 from networks import FeedForwardNN
+from utils import approximate_kl_divergence
+
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -150,14 +154,13 @@ class PPO:
                     # Calculate V_{phi, k} and pi_theta(a_t | s_t)
                     V, curr_log_probs, entropy = self.evaluate(mini_obs, mini_acts)
 
-                    # Calculate ratios
-                    log_ratios = curr_log_probs - mini_log_prob
-                    ratios = torch.exp(log_ratios)
-                    approx_kl = ((ratios - 1) - log_ratios).mean()
+                    # Calculate ratio (pi current policy / pi old policy)
+                    ratios = torch.exp(curr_log_probs - mini_log_prob)
+                    approx_kl = approximate_kl_divergence(curr_log_probs, mini_log_prob)
 
-                    # Calculate surrogate losses
-                    surr1 = ratios * mini_advantage
-                    surr2 = torch.clamp(ratios, 1-self.clip, 1+self.clip) * mini_advantage
+                    # Calculate clipped surrogate objective
+                    surr1 = ratios * mini_advantage # r(t)A
+                    surr2 = torch.clamp(ratios, 1-self.clip, 1+self.clip) * mini_advantage # clip(r(t), 1-e, 1+e)A
 
                     # Calculate actor loss
                     actor_loss = (-torch.min(surr1, surr2)).mean()
@@ -181,9 +184,9 @@ class PPO:
 
                     loss.append(actor_loss.detach())
 
-                # Approximating KL Divergence
+                # Early stop if approx. KL divergence is above the target
                 if approx_kl > self.target_kl:
-                    break # if kl aboves threshold
+                    break 
 
         # After learning is done, plot the total rewards per episode
         plt.plot(all_episode_rewards)
