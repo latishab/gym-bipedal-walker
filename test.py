@@ -129,7 +129,7 @@ def ppo_update(actor, critic, actor_optimizer, critic_optimizer, states, actions
             actor_loss = -torch.min(surr1, surr2).mean()
 
             # Compute critic loss. Inputs needs to be a tensor instead a list
-            critic_loss = F.mse_loss(minibatch_returns, minibatch_values)
+            critic_loss = F.mse_loss(minibatch_returns.squeeze(1), minibatch_values)
 
             # Combine losses for backpropagation
             total_loss = actor_loss + 0.5 * critic_loss - 0.01 * dist.entropy().mean()
