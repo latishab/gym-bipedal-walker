@@ -1,8 +1,5 @@
 from ppo import PPO
 import gym
-from gym.wrappers import RecordEpisodeStatistics, RecordVideo
-
-import os
 import torch
 
 def train(timesteps):
@@ -12,12 +9,7 @@ def train(timesteps):
     model.save_model()
 
 def test():
-    video_folder = 'videos'
-    os.makedirs(video_folder, exist_ok=True)
-    
     env = gym.make('BipedalWalker-v3', render_mode="human")
-    env = gym.wrappers.RecordEpisodeStatistics(env)
-    env = gym.wrappers.RecordVideo(env, "videos", record_video_trigger=lambda t: t % 100 == 0)
     model = PPO(env)
     model.load_model()
 
@@ -38,9 +30,9 @@ def test():
         print(f"Episode {episode + 1}: Episodic Return = {info['episode']['r']}")
 
 if __name__ == '__main__':
-    # # Train the model
-    # timesteps=2000000
-    # train(timesteps)
+    # Train the model
+    timesteps=3000000
+    train(timesteps)
 
-    # Test the model
-    test()
+    # # Test the model
+    # test()

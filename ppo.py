@@ -22,8 +22,8 @@ class PPO:
         self.render = render
 
         # Initialize actor and critic networks
-        self.actor = FeedForwardNN(self.obs_dim, self.act_dim)
-        self.critic = FeedForwardNN(self.obs_dim, 1)
+        self.actor = FeedForwardNN(self.obs_dim, self.act_dim, std=0.01)
+        self.critic = FeedForwardNN(self.obs_dim, 1, std=1.0)
 
         self.__init__hyperparameters()
 
@@ -110,8 +110,9 @@ class PPO:
         t_so_far = 0 # Timesteps simulated so far
         ep_count = 0 # Initialize episode counter
 
+        print(f"The total timesteps are: {total_timesteps}")
         while t_so_far < total_timesteps:
-            batch_obs, batch_acts, batch_log_probs, batch_rtgs, batch_lens, batch_rewards, batch_vals, batch_dones, ep_count = self.rollout(ep_count)
+            batch_obs, batch_acts, batch_log_probs, batch_rtgs, batch_lens, batch_rewards, batch_vals, batch_dones, ep_count = self.rollout(total_timesteps, ep_count)
 
             # Calculate advantage using GAE and normalize it
             A_k = self.compute_gae(batch_rewards, batch_vals, batch_dones)
@@ -212,19 +213,19 @@ class PPO:
         cumulative_timesteps, all_episode_rewards = zip(*self.episode_data)
         make_plot(cumulative_timesteps,
                   all_episode_rewards,
-                  'Timesteps', 'Total Rewards', 'Total Rewards over Timesteps', 'rewards_plot.png')
+                  'Timesteps', 'Total Rewards', 'Total Rewards over Timesteps', 'rewards_plot.png', 'benchmarks/rewards')
 
         # Plot the actor loss
         cumulative_timesteps, actor_loss_history = zip(*self.actor_loss_history)
-        make_plot(self.cumulative_timesteps, 
+        make_plot(cumulative_timesteps, 
                   actor_loss_history, 
-                  'Timesteps', 'Actor Loss', 'Actor Loss over Timesteps', 'actor_loss.png')
+                  'Timesteps', 'Actor Loss', 'Actor Loss over Timesteps', 'actor_loss.png', 'benchmarks/losses')
 
         # Plot the learning rate 
         cumulative_timesteps, lr_history = zip(*self.lr_history)
         make_plot(cumulative_timesteps,
                 lr_history, 
-                'Timesteps', 'Learning Rate', 'Learning Rate over Timesteps', 'learning_rate.png')
+                'Timesteps', 'Learning Rate', 'Learning Rate over Timesteps', 'learning_rate.png', 'benchmarks/learning_rates')
 
     def evaluate(self, batch_obs, batch_acts):
         # Query critic network for a value of V for each obs in batch_obs
@@ -257,7 +258,7 @@ class PPO:
 
         return batch_rtgs
 
-    def rollout(self, ep_count):
+    def rollout(self, total_timesteps, ep_count):
         """The agent follows its policy, interacts with the environment, and observes outcomes. 
         It's a "rollout" because you're simulating the path an agent takes in an environment 
         from start to finish for each episode."""
@@ -273,7 +274,7 @@ class PPO:
         t = 0 # Initialize timestep counter
 
         # Number of timesteps so far for this batch
-        while t < self.timesteps_per_batch:
+        while (t < self.timesteps_per_batch) and (t <= total_timesteps):
             # episodic data
             ep_rewards = [] # rewards collected per episode
             ep_vals = [] # state values collected per episode
