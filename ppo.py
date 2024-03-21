@@ -8,7 +8,7 @@ from torch.distributions import MultivariateNormal
 
 # import local functions
 from networks import FeedForwardNN
-from utils import approximate_kl_divergence
+from utils import approximate_kl_divergence, make_plot
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -21,15 +21,15 @@ class PPO:
         self.act_dim = env.action_space.shape[0]
         self.render = render
 
-        # [1] Initialize actor and critic networks
+        # Initialize actor and critic networks
         self.actor = FeedForwardNN(self.obs_dim, self.act_dim)
         self.critic = FeedForwardNN(self.obs_dim, 1)
 
         self.__init__hyperparameters()
 
-        # [2] Initialize actor and critic optimizer
-        self.actor_optim = Adam(self.actor.parameters(), lr = self.lr)
-        self.critic_optim = Adam(self.critic.parameters(), lr = self.lr)
+        # Initialize actor and critic optimizer
+        self.actor_optim = Adam(self.actor.parameters(), lr = self.lr, eps=1e-5)
+        self.critic_optim = Adam(self.critic.parameters(), lr = self.lr, eps=1e-5)
 
         # Create a variable for matrix, as well as covariance matrix
         self.cov_var = torch.full(size=(self.act_dim,), fill_value=0.5)
@@ -37,17 +37,22 @@ class PPO:
 
     def __init__hyperparameters(self):
         # Default values for hyperparameters
-        self.gamma = 0.95 # discount factor
+        self.gamma = 0.99 # discount factor
+        self.lam = 0.95 # lambda parameter for GAE
+        self.clip = 0.2 # clip threshold
+        self.lr = 0.01 # learning rate of optimizers
+        self.entropy_coef = 0.01 # entropy coefficient
+        self.max_grad_norm = 0.5 # global grad clipping threshold
+        self.target_kl = 0.02  # KL Divergence threshold
+        self.num_minibatches = 4 # Number of mini-batches for Mini-batch Update
         self.timesteps_per_batch = 4800
         self.max_timesteps_per_episode = 1600
-        self.n_updates_per_iteration = 5 # number of epochs per iteration
-        self.clip = 0.2 # clip threshold
-        self.lam = 0.98 # lambda parameter for GAE
-        self.lr = 0.005 # learning rate of optimizers
-        self.entropy_coef = 0.01 # entropy coefficient
-        self.max_grad_norm = 0.5 # grad clipping threshold
-        self.target_kl = 0.02  # KL Divergence threshold
-        self.num_minibatches = 6 # Number of mini-batches for Mini-batch Update
+        self.n_updates_per_iteration = 4 # number of epochs per iteration
+
+        # to store data for plotting
+        self.lr_history = []  # to store learning rate per episode
+        self.actor_loss_history = []  # to store actor loss per episode
+        self.episode_data = []  # to store total rewards per episode
 
     # Saving the actor and critic so we can load it back
     def save_model(self, actor_path='ppo_actor.pth', critic_path='ppo_critic.pth'):
@@ -103,23 +108,36 @@ class PPO:
 
     def learn(self, total_timesteps):
         t_so_far = 0 # Timesteps simulated so far
-        all_episode_rewards = []  # To store total rewards per episode
         ep_count = 0 # Initialize episode counter
 
         while t_so_far < total_timesteps:
             batch_obs, batch_acts, batch_log_probs, batch_rtgs, batch_lens, batch_rewards, batch_vals, batch_dones, ep_count = self.rollout(ep_count)
 
-            # Calculate V_{phi, k} and pi_theta(a_t | s_t)
-            V, curr_log_probs, entropy = self.evaluate(batch_obs, batch_acts)
-
             # Calculate advantage using GAE and normalize it
             A_k = self.compute_gae(batch_rewards, batch_vals, batch_dones)
+            V = self.critic(batch_obs).squeeze()
             batch_rtgs = A_k + V.detach()   
             A_k = (A_k - A_k.mean()) / (A_k.std() + 1e-10)
 
             # Calculate how many timesteps and all episode rewards we collected this batch
             t_so_far += np.sum(batch_lens)
-            all_episode_rewards.extend([np.sum(ep_rewards) for ep_rewards in batch_rewards])
+            for ep_rewards in batch_rewards:
+                ep_reward_sum = np.sum(ep_rewards)
+                # Check if the episode's total reward is 300 or more
+                if ep_reward_sum >= 300:
+                    print(f"Found an episode with a total reward of {ep_reward_sum} at timestep {t_so_far}.")
+                self.episode_data.append((t_so_far, ep_reward_sum)) # update episode data for plotting
+
+            # Inside the learning loop, after updating all_episode_rewards
+            _, episode_rewards = zip(*self.episode_data)
+            if len(episode_rewards) >= 100:
+                # Calculate the average of the last 100 episodes
+                last_100_avg = np.mean(episode_rewards[-100:])
+                print(f"Average episodic return for the last 100 episodes: {last_100_avg:.2f}")
+            else:
+                # If we haven't reached 100 episodes yet, calculate the average of all episodes so far
+                overall_avg = np.mean(episode_rewards)
+                print(f"Average episodic return for all episodes so far: {overall_avg:.2f}")
                                        
             step = batch_obs.size(0)
             inds = np.arange(step)
@@ -131,12 +149,13 @@ class PPO:
                 frac = (t_so_far-1.0)/total_timesteps # calculate the fraction of total timesteps completed
                 new_lr = self.lr * (1.0 - frac) # calculate the new learning rate based on the fraction completed
 
-                # Make sure the new learning rate didn't got below 0
+                # Make sure the new learning rate didn't go below 0
                 new_lr = max(new_lr, 0.0)
                 for param_group in self.actor_optim.param_groups:
                     param_group["lr"] = new_lr
                 for param_group in self.critic_optim.param_groups:
                     param_group["lr"] = new_lr
+                self.lr_history.append((t_so_far, new_lr))
 
                 # Mini-batch update [Optimization]
                 np.random.shuffle(inds) # Shuffling the index
@@ -151,7 +170,7 @@ class PPO:
                     mini_advantage = A_k[idx]
                     mini_rtgs = batch_rtgs[idx]
 
-                    # Calculate V_{phi, k} and pi_theta(a_t | s_t)
+                    # Calculate V_{phi, k}, pi_theta(a_t | s_t) and entropy
                     V, curr_log_probs, entropy = self.evaluate(mini_obs, mini_acts)
 
                     # Calculate ratio (pi current policy / pi old policy)
@@ -183,17 +202,29 @@ class PPO:
                     self.critic_optim.step()
 
                     loss.append(actor_loss.detach())
+                    self.actor_loss_history.append((t_so_far, actor_loss.item()))
 
                 # Early stop if approx. KL divergence is above the target
                 if approx_kl > self.target_kl:
                     break 
 
-        # After learning is done, plot the total rewards per episode
-        plt.plot(all_episode_rewards)
-        plt.xlabel('Episode')
-        plt.ylabel('Total Reward')
-        plt.title('Total Rewards per Episode Over Time')
-        plt.savefig('rewards_plot.png')  # save the plot
+        # After learning is done, plot the total rewards per timesteps
+        cumulative_timesteps, all_episode_rewards = zip(*self.episode_data)
+        make_plot(cumulative_timesteps,
+                  all_episode_rewards,
+                  'Timesteps', 'Total Rewards', 'Total Rewards over Timesteps', 'rewards_plot.png')
+
+        # Plot the actor loss
+        cumulative_timesteps, actor_loss_history = zip(*self.actor_loss_history)
+        make_plot(self.cumulative_timesteps, 
+                  actor_loss_history, 
+                  'Timesteps', 'Actor Loss', 'Actor Loss over Timesteps', 'actor_loss.png')
+
+        # Plot the learning rate 
+        cumulative_timesteps, lr_history = zip(*self.lr_history)
+        make_plot(cumulative_timesteps,
+                lr_history, 
+                'Timesteps', 'Learning Rate', 'Learning Rate over Timesteps', 'learning_rate.png')
 
     def evaluate(self, batch_obs, batch_acts):
         # Query critic network for a value of V for each obs in batch_obs
