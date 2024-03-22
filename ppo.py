@@ -4,10 +4,10 @@ import time
 import torch
 import torch.nn as nn
 from torch.optim import Adam
-from torch.distributions import MultivariateNormal
+from torch.distributions import Normal
 
 # import local functions
-from networks import FeedForwardNN
+from networks import MLP, MLPWithStd
 from utils import approximate_kl_divergence, make_plot
 import numpy as np
 
@@ -20,18 +20,14 @@ class PPO:
         self.render = render
 
         # Initialize actor and critic networks
-        self.actor = FeedForwardNN(self.obs_dim, self.act_dim, std=0.01)
-        self.critic = FeedForwardNN(self.obs_dim, 1, std=1.0)
+        self.actor = MLPWithStd(self.obs_dim, self.act_dim, std=0.01)
+        self.critic = MLP(self.obs_dim, 1, std=1.0)
 
         self.__init__hyperparameters()
 
         # Initialize actor and critic optimizer
         self.actor_optim = Adam(self.actor.parameters(), lr = self.lr, eps=1e-5)
         self.critic_optim = Adam(self.critic.parameters(), lr = self.lr, eps=1e-5)
-
-        # Create a variable for matrix, as well as covariance matrix
-        self.cov_var = torch.full(size=(self.act_dim,), fill_value=0.5)
-        self.cov_mat = torch.diag(self.cov_var)
 
     def __init__hyperparameters(self):
         # Default values for hyperparameters
@@ -64,16 +60,13 @@ class PPO:
         print("Model loaded successfully.")
 
     def get_action(self, obs):
-        # Query the actor network for a mean action
-        # Same thing as calling self.actor.forward(obs)
-        mean = self.actor(obs)
+        # Query the actor network for mean and std of the action distribution
+        mean, std = self.actor(obs)
 
-        # Create Multivariate Normal Distribution
-        dist = MultivariateNormal(mean, self.cov_mat)
-
-        # Sample an action from the distribution and get its log prob
+        # Create a Normal Distribution and sample an action
+        dist = Normal(mean, std)
         action = dist.sample()
-        log_prob = dist.log_prob(action)
+        log_prob = dist.log_prob(action).sum(-1)
 
         return action.detach().numpy(), log_prob.detach() # we detach the computational graphs (because its a tensor)
 
@@ -128,12 +121,12 @@ class PPO:
         V = self.critic(batch_obs).squeeze()
 
         # Calculate the log probabilities of batch actions using most recent actor network
-        # This part is similar to get_action()
-        mean = self.actor(batch_obs)
-        dist = MultivariateNormal(mean, self.cov_mat)
-        log_probs = dist.log_prob(batch_acts)
+        mean, std = self.actor(batch_obs)
+        dist = Normal(mean, std)
+        log_probs = dist.log_prob(batch_acts).sum(-1)
+        entropy = dist.entropy()
 
-        return V, log_probs, dist.entropy()
+        return V, log_probs, entropy
 
     def learn(self, total_timesteps):
         t_so_far = 0 # Timesteps simulated so far
@@ -141,7 +134,7 @@ class PPO:
 
         print(f"The total timesteps are: {total_timesteps}")
         while t_so_far < total_timesteps:
-            batch_obs, batch_acts, batch_log_probs, batch_rtgs, batch_lens, batch_rewards, batch_vals, batch_dones, ep_count, t_so_far = self.rollout(total_timesteps, ep_count, t_so_far)
+            batch_obs, batch_acts, batch_log_probs, batch_rtgs, batch_lens, batch_rewards, batch_vals, batch_dones, ep_count = self.rollout(total_timesteps, ep_count, t_so_far)
 
             # Calculate advantage using GAE and normalize it
             A_k = self.compute_gae(batch_rewards, batch_vals, batch_dones)
@@ -151,12 +144,6 @@ class PPO:
 
             # Calculate how many timesteps and all episode rewards we collected this batch
             t_so_far += np.sum(batch_lens)
-            for ep_rewards in batch_rewards:
-                ep_reward_sum = np.sum(ep_rewards)
-                # Check if the episode's total reward is 300 or more
-                if ep_reward_sum >= 300:
-                    print(f"Found an episode with a total reward of {ep_reward_sum} at timestep {t_so_far}.")
-                self.episode_data.append((t_so_far, ep_reward_sum)) # update episode data for plotting
 
             # Inside the learning loop, after updating all_episode_rewards
             _, episode_returns = zip(*self.episode_data)
@@ -294,6 +281,7 @@ class PPO:
                 batch_obs.append(obs)
 
                 action, log_prob = self.get_action(obs)
+                action = action.squeeze()
                 val = self.critic(obs)
                 obs, rewards, terminated, truncated, info = self.env.step(action)
                 done = terminated or truncated
@@ -308,12 +296,16 @@ class PPO:
                     if "episode" in info.keys():  # Check if 'episode' key exists in info
                         episodic_return = info['episode']['r']
                         episodic_length = info['episode']['l']
+                        curr_timestep = t_so_far + np.sum(batch_lens) + ep_t + 1
+                        
+                        if episodic_return >= 300:
+                            print(f"Found an episode with a total reward of {episodic_return} at timestep {curr_timestep}.")
                         # print(f"Episode {ep_count} finished after {ep_t+1} timesteps with reward: {episodic_return}")
 
                         # store the episodic returns
-                        self.episode_data.append((t_so_far + np.sum(batch_lens) + ep_t + 1, episodic_return))
+                        self.episode_data.append((curr_timestep, episodic_return))
 
-                        print(f"Episode {ep_count} finished after {episodic_length} timesteps with reward: {episodic_return} | global_steps={t_so_far}")
+                        print(f"Episode {ep_count} finished after {episodic_length} timesteps with reward: {episodic_return} | global_steps={curr_timestep}")
                         ep_count += 1 
                     break
             

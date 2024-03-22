@@ -24,8 +24,8 @@ def test(seed=0):
 
 if __name__ == '__main__':
     # Train the model
-    # timesteps=2000000
-    # train(timesteps)
+    timesteps=2000000
+    train(timesteps)
 
     # # Test the model
-    test(seed=0)
+    # test(seed=0)
