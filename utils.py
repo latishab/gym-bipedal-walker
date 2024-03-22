@@ -31,7 +31,7 @@ def make_env():
     env = gym.wrappers.RecordVideo(
         env,
         video_folder=video_folder,  
-        episode_trigger=lambda episode_id: episode_id % 100 == 0,
+        episode_trigger=lambda episode_id: episode_id % 200 == 0, # trigger video every 200 episodes
         name_prefix="bw-video"
     )
     env = gym.wrappers.ClipAction(env)

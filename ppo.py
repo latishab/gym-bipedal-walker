@@ -7,7 +7,7 @@ from torch.optim import Adam
 from torch.distributions import Normal
 
 # import local functions
-from networks import MLP, MLPWithStd
+from networks import MLPActor, MLPCritic
 from utils import approximate_kl_divergence, make_plot
 import numpy as np
 
@@ -20,21 +20,22 @@ class PPO:
         self.render = render
 
         # Initialize actor and critic networks
-        self.actor = MLPWithStd(self.obs_dim, self.act_dim, std=0.01)
-        self.critic = MLP(self.obs_dim, 1, std=1.0)
+        self.actor = MLPActor(self.obs_dim, self.act_dim, std=0.01)
+        self.critic = MLPCritic(self.obs_dim, 1, std=1.0)
 
         self.__init__hyperparameters()
 
         # Initialize actor and critic optimizer
-        self.actor_optim = Adam(self.actor.parameters(), lr = self.lr, eps=1e-5)
-        self.critic_optim = Adam(self.critic.parameters(), lr = self.lr, eps=1e-5)
+        self.actor_optim = Adam(self.actor.parameters(), lr = self.lr_actor, eps=self.epsilon_start)
+        self.critic_optim = Adam(self.critic.parameters(), lr = self.lr_critic, eps=self.epsilon_end)
 
     def __init__hyperparameters(self):
         # Default values for hyperparameters
         self.gamma = 0.99 # discount factor
         self.lam = 0.95 # lambda parameter for GAE
         self.clip = 0.2 # clip threshold
-        self.lr = 3e-4 # learning rate of optimizers
+        self.lr_actor = 3e-4 # learning rate for actor
+        self.lr_critic = 4e-4 # learning rate for critic
         self.entropy_coef = 0.0 # entropy coefficient
         self.max_grad_norm = 0.5 # global grad clipping threshold
         self.target_kl = 0.02  # KL Divergence threshold
@@ -42,6 +43,10 @@ class PPO:
         self.timesteps_per_batch = 4800
         self.max_timesteps_per_episode = 1600
         self.n_updates_per_iteration = 10 # number of epochs per iteration
+
+        # for epsilon annealing
+        self.epsilon_start = 1e-6
+        self.epsilon_end = 1e-4
 
         # to store data for plotting
         self.lr_history = []  # to store learning rate per episode
@@ -54,6 +59,7 @@ class PPO:
         torch.save(self.critic.state_dict(), critic_path)
         print("Model saved successfully.")
 
+    # Load the model
     def load_model(self, actor_path='ppo_actor.pth', critic_path='ppo_critic.pth'):
         self.actor.load_state_dict(torch.load(actor_path))
         self.critic.load_state_dict(torch.load(critic_path))
@@ -164,15 +170,20 @@ class PPO:
             for _ in range(self.n_updates_per_iteration):
                 # Perform learning rate annealing [Optimization]
                 frac = (t_so_far-1.0)/total_timesteps # calculate the fraction of total timesteps completed
-                new_lr = self.lr * (1.0 - frac) # calculate the new learning rate based on the fraction completed
+                new_lr_actor = self.lr_actor * (1.0 - frac) # calculate the new learning rate for actor
+                new_lr_critic = self.lr_critic * (1.0 - frac) # calculate the new learning rate for critic
 
                 # Make sure the new learning rate didn't go below 0
-                new_lr = max(new_lr, 0.0)
+                new_lr_actor = max(new_lr_actor, 0.0)
+                new_lr_critic = max(new_lr_critic, 0.0)
                 for param_group in self.actor_optim.param_groups:
-                    param_group["lr"] = new_lr
+                    param_group["lr"] = new_lr_actor
                 for param_group in self.critic_optim.param_groups:
-                    param_group["lr"] = new_lr
-                self.lr_history.append((t_so_far, new_lr))
+                    param_group["lr"] = new_lr_critic
+                self.lr_history.append((t_so_far, new_lr_actor))
+
+                # Epsilon annealing
+                self.critic_optim.param_groups[0]["eps"] = max(self.epsilon_start - t_so_far * (self.epsilon_start - self.epsilon_end) / total_timesteps, self.epsilon_end)
 
                 # Mini-batch update [Optimization]
                 np.random.shuffle(inds) # Shuffling the index
@@ -205,6 +216,13 @@ class PPO:
                     # Entropy regularization [Optimization]
                     entropy_loss = entropy.mean()
                     actor_loss = actor_loss - self.entropy_coef * entropy_loss 
+
+                    # Calculate clipped value function loss
+                    estimated_value = self.critic(mini_obs).squeeze()
+                    critic_loss1 = torch.square(estimated_value - mini_rtgs)
+                    estimated_value_clipped = mini_rtgs + torch.clamp(self.critic(mini_obs).squeeze() - mini_rtgs, -self.clip, self.clip)
+                    critic_loss2 = torch.square(estimated_value_clipped - mini_rtgs)
+                    critic_loss += 0.5 * (torch.maximum(critic_loss1, critic_loss2)).mean()
 
                     # Calculate gradients and perform backward propagation for actor network
                     self.actor_optim.zero_grad()

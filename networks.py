@@ -9,9 +9,9 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
-class MLP(nn.Module):
+class MLPCritic(nn.Module):
     def __init__(self, in_dim, out_dim, std=0.01):
-        super(MLP, self).__init__()
+        super(MLPCritic, self).__init__()
 
         self.network = nn.Sequential(
             layer_init(nn.Linear(in_dim, 64)),
@@ -25,10 +25,10 @@ class MLP(nn.Module):
         obs = torch.tensor(obs, dtype=torch.float) if isinstance(obs, np.ndarray) else obs
         return self.network(obs)
 
-class MLPWithStd(nn.Module):
+class MLPActor(nn.Module):
     """Include state-independet log standard deviation"""
     def __init__(self, in_dim, out_dim, std=0.01):
-        super(MLPWithStd, self).__init__()
+        super(MLPActor, self).__init__()
 
         self.network = nn.Sequential(
             layer_init(nn.Linear(in_dim, 64)),
