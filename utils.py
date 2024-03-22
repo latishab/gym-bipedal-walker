@@ -2,6 +2,45 @@ import torch
 import matplotlib.pyplot as plt
 import os
 import re
+import gym
+import numpy as np
+
+def make_env():
+    render_mode = "rgb_array"
+    env_id = "BipedalWalker-v3"
+    env = gym.make(env_id, render_mode=render_mode)
+
+    # Determine the new batch folder name
+    video_folder_base = "videos"
+    if not os.path.exists(video_folder_base):
+        os.makedirs(video_folder_base)
+    existing_batches = [d for d in os.listdir(video_folder_base) if os.path.isdir(os.path.join(video_folder_base, d)) and d.startswith("batch_")]
+    if existing_batches:
+        highest_batch_num = max([int(batch.split('_')[-1]) for batch in existing_batches])
+        new_batch_num = highest_batch_num + 1
+    else:
+        new_batch_num = 1
+    video_folder = os.path.join(video_folder_base, f"batch_{new_batch_num}")
+
+    # Create the new batch directory if it does not exist
+    if not os.path.exists(video_folder):
+        os.makedirs(video_folder)
+
+    # Setup environment with new video folder path
+    env = gym.wrappers.RecordEpisodeStatistics(env)
+    env = gym.wrappers.RecordVideo(
+        env,
+        video_folder=video_folder,  
+        episode_trigger=lambda episode_id: episode_id % 100 == 0,
+        name_prefix="bw-video"
+    )
+    env = gym.wrappers.ClipAction(env)
+    env = gym.wrappers.NormalizeObservation(env)
+    env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10))
+    env = gym.wrappers.NormalizeReward(env)
+    env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
+
+    return env
 
 def approximate_kl_divergence(new_log_probs, old_log_probs):
     # Calculate the log probability ratios
@@ -41,11 +80,11 @@ def make_plot(x_param, y_param, x_label, y_label, title, file_name, folder_path)
         if not os.path.exists(file_path):
             break
         i += 1
-    
+
+    plt.figure() # Start a fresh figure
     plt.plot(x_param, y_param)
     plt.xlabel(x_label)
     plt.ylabel(y_label)
     plt.title(title)
-    
-    # Save the plot with the generated filename
-    plt.savefig(file_path)
+    plt.savefig(file_path) # Save the plot with the generated filename
+    plt.clf() # Clear the figure

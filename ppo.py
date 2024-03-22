@@ -9,8 +9,6 @@ from torch.distributions import MultivariateNormal
 # import local functions
 from networks import FeedForwardNN
 from utils import approximate_kl_divergence, make_plot
-
-import matplotlib.pyplot as plt
 import numpy as np
 
 class PPO:
@@ -40,14 +38,14 @@ class PPO:
         self.gamma = 0.99 # discount factor
         self.lam = 0.95 # lambda parameter for GAE
         self.clip = 0.2 # clip threshold
-        self.lr = 0.01 # learning rate of optimizers
-        self.entropy_coef = 0.01 # entropy coefficient
+        self.lr = 3e-4 # learning rate of optimizers
+        self.entropy_coef = 0.0 # entropy coefficient
         self.max_grad_norm = 0.5 # global grad clipping threshold
         self.target_kl = 0.02  # KL Divergence threshold
-        self.num_minibatches = 4 # Number of mini-batches for Mini-batch Update
+        self.num_minibatches = 32 # Number of mini-batches for Mini-batch Update
         self.timesteps_per_batch = 4800
         self.max_timesteps_per_episode = 1600
-        self.n_updates_per_iteration = 4 # number of epochs per iteration
+        self.n_updates_per_iteration = 10 # number of epochs per iteration
 
         # to store data for plotting
         self.lr_history = []  # to store learning rate per episode
@@ -105,6 +103,37 @@ class PPO:
             batch_advantages.extend(advantages)
 
         return torch.tensor(batch_advantages, dtype=torch.float32)
+    
+    def compute_rtgs(self, batch_rewards):
+        # The rewards-to-go (rtg) per episode per batch to return.
+        # The shape will be (num timesteps per episode)
+        batch_rtgs = []
+
+        # Iterate through each episode backwards to maintain same order
+        # in batch_rgts
+        for ep_rewards in reversed(batch_rewards):
+            discounted_reward = 0 # The discounted reward so far
+
+            for reward in reversed(ep_rewards):
+                discounted_reward = reward + discounted_reward * self.gamma
+                batch_rtgs.insert(0, discounted_reward)
+        
+        # Convert the rewards-to-go to a tensor
+        batch_rtgs = torch.tensor(batch_rtgs, dtype=torch.float)
+
+        return batch_rtgs
+    
+    def evaluate(self, batch_obs, batch_acts):
+        # Query critic network for a value of V for each obs in batch_obs
+        V = self.critic(batch_obs).squeeze()
+
+        # Calculate the log probabilities of batch actions using most recent actor network
+        # This part is similar to get_action()
+        mean = self.actor(batch_obs)
+        dist = MultivariateNormal(mean, self.cov_mat)
+        log_probs = dist.log_prob(batch_acts)
+
+        return V, log_probs, dist.entropy()
 
     def learn(self, total_timesteps):
         t_so_far = 0 # Timesteps simulated so far
@@ -112,7 +141,7 @@ class PPO:
 
         print(f"The total timesteps are: {total_timesteps}")
         while t_so_far < total_timesteps:
-            batch_obs, batch_acts, batch_log_probs, batch_rtgs, batch_lens, batch_rewards, batch_vals, batch_dones, ep_count = self.rollout(total_timesteps, ep_count)
+            batch_obs, batch_acts, batch_log_probs, batch_rtgs, batch_lens, batch_rewards, batch_vals, batch_dones, ep_count, t_so_far = self.rollout(total_timesteps, ep_count, t_so_far)
 
             # Calculate advantage using GAE and normalize it
             A_k = self.compute_gae(batch_rewards, batch_vals, batch_dones)
@@ -130,14 +159,14 @@ class PPO:
                 self.episode_data.append((t_so_far, ep_reward_sum)) # update episode data for plotting
 
             # Inside the learning loop, after updating all_episode_rewards
-            _, episode_rewards = zip(*self.episode_data)
-            if len(episode_rewards) >= 100:
+            _, episode_returns = zip(*self.episode_data)
+            if len(episode_returns) >= 100:
                 # Calculate the average of the last 100 episodes
-                last_100_avg = np.mean(episode_rewards[-100:])
+                last_100_avg = np.mean(episode_returns[-100:])
                 print(f"Average episodic return for the last 100 episodes: {last_100_avg:.2f}")
             else:
                 # If we haven't reached 100 episodes yet, calculate the average of all episodes so far
-                overall_avg = np.mean(episode_rewards)
+                overall_avg = np.mean(episode_returns)
                 print(f"Average episodic return for all episodes so far: {overall_avg:.2f}")
                                        
             step = batch_obs.size(0)
@@ -227,38 +256,7 @@ class PPO:
                 lr_history, 
                 'Timesteps', 'Learning Rate', 'Learning Rate over Timesteps', 'learning_rate.png', 'benchmarks/learning_rates')
 
-    def evaluate(self, batch_obs, batch_acts):
-        # Query critic network for a value of V for each obs in batch_obs
-        V = self.critic(batch_obs).squeeze()
-
-        # Calculate the log probabilities of batch actions using most recent actor network
-        # This part is similar to get_action()
-        mean = self.actor(batch_obs)
-        dist = MultivariateNormal(mean, self.cov_mat)
-        log_probs = dist.log_prob(batch_acts)
-
-        return V, log_probs, dist.entropy()
-    
-    def compute_rtgs(self, batch_rewards):
-        # The rewards-to-go (rtg) per episode per batch to return.
-        # The shape will be (num timesteps per episode)
-        batch_rtgs = []
-
-        # Iterate through each episode backwards to maintain same order
-        # in batch_rgts
-        for ep_rewards in reversed(batch_rewards):
-            discounted_reward = 0 # The discounted reward so far
-
-            for reward in reversed(ep_rewards):
-                discounted_reward = reward + discounted_reward * self.gamma
-                batch_rtgs.insert(0, discounted_reward)
-        
-        # Convert the rewards-to-go to a tensor
-        batch_rtgs = torch.tensor(batch_rtgs, dtype=torch.float)
-
-        return batch_rtgs
-
-    def rollout(self, total_timesteps, ep_count):
+    def rollout(self, total_timesteps, ep_count, t_so_far):
         """The agent follows its policy, interacts with the environment, and observes outcomes. 
         It's a "rollout" because you're simulating the path an agent takes in an environment 
         from start to finish for each episode."""
@@ -280,7 +278,7 @@ class PPO:
             ep_vals = [] # state values collected per episode
             ep_dones = [] # done flag collected per episode
 
-            obs, _ = self.env.reset()
+            obs, _ = self.env.reset(seed=0)
             done = False
 
             for ep_t in range(self.max_timesteps_per_episode):
@@ -297,7 +295,7 @@ class PPO:
 
                 action, log_prob = self.get_action(obs)
                 val = self.critic(obs)
-                obs, rewards, terminated, truncated, _ = self.env.step(action)
+                obs, rewards, terminated, truncated, info = self.env.step(action)
                 done = terminated or truncated
 
                 # Collect reward, action, log_prob
@@ -307,9 +305,16 @@ class PPO:
                 batch_log_probs.append(log_prob)
 
                 if done:
-                    ep_reward_sum = np.sum(ep_rewards)
-                    ep_count += 1 
-                    print(f"Episode {ep_count} finished after {ep_t+1} timesteps with reward: {ep_reward_sum}")
+                    if "episode" in info.keys():  # Check if 'episode' key exists in info
+                        episodic_return = info['episode']['r']
+                        episodic_length = info['episode']['l']
+                        # print(f"Episode {ep_count} finished after {ep_t+1} timesteps with reward: {episodic_return}")
+
+                        # store the episodic returns
+                        self.episode_data.append((t_so_far + np.sum(batch_lens) + ep_t + 1, episodic_return))
+
+                        print(f"Episode {ep_count} finished after {episodic_length} timesteps with reward: {episodic_return} | global_steps={t_so_far}")
+                        ep_count += 1 
                     break
             
             # Collect episodic lengths and rewards
