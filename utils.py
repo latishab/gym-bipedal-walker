@@ -4,7 +4,9 @@ import os
 import re
 import gym
 import numpy as np
+from moviepy.editor import VideoFileClip
 
+# Create an environment
 def make_env():
     render_mode = "rgb_array"
     env_id = "BipedalWalker-v3"
@@ -42,6 +44,7 @@ def make_env():
 
     return env
 
+# Approximate KL divergence
 def approximate_kl_divergence(new_log_probs, old_log_probs):
     # Calculate the log probability ratios
     # http://joschu.net/blog/kl-approx.html
@@ -52,6 +55,7 @@ def approximate_kl_divergence(new_log_probs, old_log_probs):
     
     return approximate_kl
 
+# Create plot
 def make_plot(x_param, y_param, x_label, y_label, title, file_name, folder_path):
     # Check if x_param and y_param have the same length
     if len(x_param) != len(y_param):
@@ -88,3 +92,27 @@ def make_plot(x_param, y_param, x_label, y_label, title, file_name, folder_path)
     plt.title(title)
     plt.savefig(file_path) # Save the plot with the generated filename
     plt.clf() # Clear the figure
+
+# Convert videos to GIFs
+def videos_to_gifs(input_folder, output_folder):
+    # Create the output folder if it doesn't exist
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+    
+    # Get a list of all video files in the input folder
+    video_files = [f for f in os.listdir(input_folder) if f.endswith(('.mp4', '.avi', '.mov'))]
+
+    print("Converting videos to GIF files...")
+    for video_file in video_files:
+        # Construct the input and output file paths
+        input_path = os.path.join(input_folder, video_file)
+        output_path = os.path.join(output_folder, os.path.splitext(video_file)[0] + '.gif')
+    
+        video_clip = VideoFileClip(input_path) # Load the video clip
+        video_clip.write_gif(output_path) # Convert the video clip to GIF
+        video_clip.close() # Close the video clip
+    print("Finished converting videos to GIF files.")
+
+videos_folder = 'videos/batch_13'
+gifs_folder = 'gifs'
+videos_to_gifs(videos_folder, gifs_folder)

@@ -1,7 +1,6 @@
 import torch
 from torch import nn
 import numpy as np
-from torch.distributions import Normal
 
 # Orthogonal Initialization
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
