@@ -1,0 +1,8 @@
+# Without adam epsilon annealing
+python3 main.py --lr_annealing --value_loss_clipping 
+
+# Without value function loss clipping
+python3 main.py --lr_annealing --adam_epsilon_annealing 
+
+# Without learning rate annealing
+python3 main.py --adam_epsilon_annealing --value_loss_clipping

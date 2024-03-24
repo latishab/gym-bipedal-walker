@@ -1,10 +1,11 @@
 from ppo import PPO
 from utils import make_env
+from parser import parse_args
 import gym
 
-def train(timesteps):
+def train(timesteps, args):
     env = make_env()
-    model = PPO(env)
+    model = PPO(env, args)
     model.learn(total_timesteps=timesteps)
     model.save_model()
 
@@ -32,8 +33,9 @@ def test(num_episodes=10, seed=0):
 
 if __name__ == '__main__':
     # Train the model
-    # timesteps=3000000
-    # train(timesteps)
+    args = parse_args()
+    timesteps=3000000
+    train(timesteps, args)
 
-    # Test the model
-    test()
+    # # Test the model
+    # test()

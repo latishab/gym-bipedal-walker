@@ -113,6 +113,7 @@ def videos_to_gifs(input_folder, output_folder):
         video_clip.close() # Close the video clip
     print("Finished converting videos to GIF files.")
 
-videos_folder = 'videos/batch_13'
-gifs_folder = 'gifs'
-videos_to_gifs(videos_folder, gifs_folder)
+# # Convert to videos to GIFs
+# videos_folder = 'videos/batch_13'
+# gifs_folder = 'gifs'
+# videos_to_gifs(videos_folder, gifs_folder)

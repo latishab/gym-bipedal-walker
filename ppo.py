@@ -12,12 +12,13 @@ from utils import approximate_kl_divergence, make_plot
 import numpy as np
 
 class PPO:
-    def __init__(self, env, render=False):
+    def __init__(self, env, args, render=False):
         # Extract env info
         self.env = env
         self.obs_dim = env.observation_space.shape[0]
         self.act_dim = env.action_space.shape[0]
         self.render = render
+        self.args = args
 
         # Initialize actor and critic networks
         self.actor = MLPActor(self.obs_dim, self.act_dim, std=0.01)
@@ -74,28 +75,28 @@ class PPO:
         action = dist.sample()
         log_prob = dist.log_prob(action).sum(-1)
 
-        return action.detach().numpy(), log_prob.detach() # we detach the computational graphs (because its a tensor)
+        return action.detach().numpy(), log_prob.detach() # We detach the computational graphs (because its a tensor)
 
     def compute_gae(self, rewards, values, dones):
-        batch_advantages = [] # List to store computed advantages for each timestep
+        batch_advantages = [] # List to store computed advantages for each step
 
         # Iterate over each episode's rewards, values, dones flags
         for ep_rewards, ep_vals, ep_dones in zip(rewards, values, dones):
             advantages = []
             last_advantage = 0
 
-            # Calculate episode advantage in reversed order (from last timestep to first)
+            # Calculate episode advantage in reversed order (from last step to first)
             for t in reversed(range(len(ep_rewards))): 
                 if t + 1 < len(ep_rewards):
-                    # Calculate the temporal difference (TD) error for the current timestep
+                    # Calculate the temporal difference (TD) error for current step
                     delta = ep_rewards[t] + self.gamma * ep_vals[t+1] * (1 - ep_dones[t+1]) - ep_vals[t]
                 else: 
-                    # Special case at the boundary (last timestep)
+                    # Special case at the boundary (last step)
                     delta = ep_rewards[t] - ep_vals[t]
                 
-                # Calculate Generalized Advantage Estimation (GAE) for the current timestep
+                # Calculate Generalized Advantage Estimation (GAE) for the current step
                 advantage = delta + self.gamma * self.lam * (1 - ep_dones[t]) * last_advantage
-                last_advantage = advantage  # Update the last advantage for the next timestep
+                last_advantage = advantage  # Update the last advantage for the next step
                 advantages.insert(0, advantage)  # Insert advantage at the beginning of the list
             
             # Extend the batch_advantages list with advantages computed for the current episode
@@ -105,7 +106,7 @@ class PPO:
     
     def compute_rtgs(self, batch_rewards):
         # The rewards-to-go (rtg) per episode per batch to return.
-        # The shape will be (num timesteps per episode)
+        # The shape will be (num steps per episode)
         batch_rtgs = []
 
         # Iterate through each episode backwards to maintain same order
@@ -148,10 +149,10 @@ class PPO:
             batch_rtgs = A_k + V.detach()   
             A_k = (A_k - A_k.mean()) / (A_k.std() + 1e-10)
 
-            # Calculate how many timesteps and all episode rewards we collected this batch
+            # Calculate how many steps we have collected this batch
             t_so_far += np.sum(batch_lens)
 
-            # Inside the learning loop, after updating all_episode_rewards
+            # Print average episodic returns
             _, episode_returns = zip(*self.episode_data)
             if len(episode_returns) >= 100:
                 # Calculate the average of the last 100 episodes
@@ -168,22 +169,24 @@ class PPO:
             loss = []
 
             for _ in range(self.n_updates_per_iteration):
-                # Perform learning rate annealing [Optimization]
-                frac = (t_so_far-1.0)/total_timesteps # calculate the fraction of total timesteps completed
-                new_lr_actor = self.lr_actor * (1.0 - frac) # calculate the new learning rate for actor
-                new_lr_critic = self.lr_critic * (1.0 - frac) # calculate the new learning rate for critic
+                if self.args.lr_annealing:
+                    # Perform learning rate annealing [Optimization]
+                    frac = (t_so_far-1.0)/total_timesteps # calculate the fraction of total timesteps completed
+                    new_lr_actor = self.lr_actor * (1.0 - frac) # calculate the new learning rate for actor
+                    new_lr_critic = self.lr_critic * (1.0 - frac) # calculate the new learning rate for critic
 
-                # Make sure the new learning rate didn't go below 0
-                new_lr_actor = max(new_lr_actor, 0.0)
-                new_lr_critic = max(new_lr_critic, 0.0)
-                for param_group in self.actor_optim.param_groups:
-                    param_group["lr"] = new_lr_actor
-                for param_group in self.critic_optim.param_groups:
-                    param_group["lr"] = new_lr_critic
-                self.lr_history.append((t_so_far, new_lr_actor))
+                    # Make sure the new learning rate didn't go below 0
+                    new_lr_actor = max(new_lr_actor, 0.0)
+                    new_lr_critic = max(new_lr_critic, 0.0)
+                    for param_group in self.actor_optim.param_groups:
+                        param_group["lr"] = new_lr_actor
+                    for param_group in self.critic_optim.param_groups:
+                        param_group["lr"] = new_lr_critic
+                    self.lr_history.append((t_so_far, new_lr_actor))
 
-                # Epsilon annealing
-                self.critic_optim.param_groups[0]["eps"] = max(self.epsilon_start - t_so_far * (self.epsilon_start - self.epsilon_end) / total_timesteps, self.epsilon_end)
+                if self.args.adam_epsilon_annealing:
+                    # Epsilon annealing
+                    self.critic_optim.param_groups[0]["eps"] = max(self.epsilon_start - t_so_far * (self.epsilon_start - self.epsilon_end) / total_timesteps, self.epsilon_end)
 
                 # Mini-batch update [Optimization]
                 np.random.shuffle(inds) # Shuffling the index
@@ -211,31 +214,36 @@ class PPO:
 
                     # Calculate actor loss
                     actor_loss = (-torch.min(surr1, surr2)).mean()
-                    critic_loss = nn.MSELoss()(V, mini_rtgs)
 
                     # Entropy regularization [Optimization]
                     entropy_loss = entropy.mean()
                     actor_loss = actor_loss - self.entropy_coef * entropy_loss 
 
-                    # Calculate clipped value function loss
-                    estimated_value = self.critic(mini_obs).squeeze()
-                    critic_loss1 = torch.square(estimated_value - mini_rtgs)
-                    estimated_value_clipped = mini_rtgs + torch.clamp(self.critic(mini_obs).squeeze() - mini_rtgs, -self.clip, self.clip)
-                    critic_loss2 = torch.square(estimated_value_clipped - mini_rtgs)
-                    critic_loss += 0.5 * (torch.maximum(critic_loss1, critic_loss2)).mean()
+                    if self.args.value_loss_clipping:
+                        # Calculate clipped value function loss
+                        estimated_value = self.critic(mini_obs).squeeze()
+                        critic_loss1 = torch.square(estimated_value - mini_rtgs)
+                        estimated_value_clipped = mini_rtgs + torch.clamp(self.critic(mini_obs).squeeze() - mini_rtgs, -self.clip, self.clip)
+                        critic_loss2 = torch.square(estimated_value_clipped - mini_rtgs)
+                        critic_loss = 0.5 * (torch.maximum(critic_loss1, critic_loss2)).mean()
+                    else:
+                        # Standard value function loss calculation without clipping
+                        V = self.critic(mini_obs).squeeze()
+                        critic_loss = nn.MSELoss()(V, mini_rtgs)
 
-                    # Calculate gradients and perform backward propagation for actor network
+                    # Backpropagation for actor network
                     self.actor_optim.zero_grad()
                     actor_loss.backward(retain_graph=True)
-                    nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm) # gradient clipping [Optimization]
+                    nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm) # global gradient clipping [Optimization]
                     self.actor_optim.step()
 
-                    # Calculate gradients and perform backward propagation for critic network
+                    # Backpropagation for critic network
                     self.critic_optim.zero_grad()
                     critic_loss.backward(retain_graph=True)
-                    nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm) # gradient clipping [Optimization]
+                    nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm) # global gradient clipping [Optimization]
                     self.critic_optim.step()
 
+                    # Store the losses
                     loss.append(actor_loss.detach())
                     self.actor_loss_history.append((t_so_far, actor_loss.item()))
 
