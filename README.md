@@ -1,6 +1,6 @@
 OpenAI BipedalWalker
 
-![BipedalWalker Episode 3200 - 306 Rewards](https://github.com/latishab/gym-bipedalwalker/blob/main/gifs/bw-video-episode-3200-306rew.gif?raw=true)
+![BipedalWalker Episode 3200 - 306 Rewards](https://github.com/latishab/gym-bipedal-walker/blob/main/gifs/bw-video-episode-3200-306rew.gif)
 
 To solve the normal version, you need to get 300 points in 1600 time steps. To solve the hardcore version, you need 300 points in 2000 time steps.
 
